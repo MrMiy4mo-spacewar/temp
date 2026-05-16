@@ -1,0 +1,28 @@
+name: Find *.sqe.fw files
+
+on:
+  workflow_dispatch:        # run manually from the Actions tab
+
+jobs:
+  find-sqe-fw:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120    # large group — give it time
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get install -y jq parallel
+
+      - name: Run finder script
+        run: |
+          chmod +x find_sqe_fw.sh
+          bash find_sqe_fw.sh
+
+      - name: Upload results as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sqe-fw-files
+          path: sqe_fw_files.csv
+          retention-days: 30
