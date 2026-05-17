@@ -58,10 +58,10 @@ search_project() {
 
     [[ -z "$resp" || "$resp" == "[]" || "$resp" == "null" ]] && break
 
-    # filter blobs ending in .sqe.fw
+    # filter blobs ending in sqe.fw
     local matches
     matches=$(echo "$resp" | jq -r \
-      '.[] | select(.type == "blob" and (.path | endswith(".sqe.fw"))) | .path' \
+      '.[] | select(.type == "blob" and (.path | endswith("sqe.fw"))) | .path' \
       2>/dev/null || true)
 
     if [[ -n "$matches" ]]; then
@@ -105,6 +105,6 @@ find "$RESULTS_DIR" -name "*.csv" -exec cat {} \; >> "$OUTPUT"
 found=$(( $(wc -l < "$OUTPUT") - 1 ))
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo " Done. Found $found *.sqe.fw file(s)"
+echo " Done. Found $found *sqe.fw file(s)"
 echo " Output: $OUTPUT"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
