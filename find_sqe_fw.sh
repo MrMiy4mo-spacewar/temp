@@ -3,14 +3,17 @@ set -euo pipefail
 
 BASE="https://dumps.tadiphone.dev/api/v4"
 GROUP="dumps"
-CONCURRENCY=10
+CONCURRENCY=30
 OUTPUT="sqe_fw_files.csv"
 HTTP_LOG="http_responses.csv"
 TMPDIR_ROOT=$(mktemp -d)
 trap 'rm -rf "$TMPDIR_ROOT"' EXIT
 
+ERRORS_LOG="http_errors.csv"
+
 echo "repo,file_path,url" > "$OUTPUT"
 echo "stage,project_id,namespace,url,http_code" > "$HTTP_LOG"
+echo "stage,project_id,namespace,url,http_code" > "$ERRORS_LOG"
 
 HTTP_LOG_DIR="$TMPDIR_ROOT/http_logs"
 mkdir -p "$HTTP_LOG_DIR"
@@ -32,6 +35,12 @@ curl_with_code() {
   http_code=$(curl -s -o "$tmpbody" -w "%{http_code}" "$url" || echo "000")
 
   echo "\"${stage}\",\"${proj_id}\",\"${ns}\",\"${url}\",\"${http_code}\"" >> "$log_file"
+
+  # Print anything that isn't 200 immediately to stderr
+  if [[ "$http_code" != "200" ]]; then
+    echo "[WARN] HTTP ${http_code} — stage=${stage} ns=${ns} url=${url}" >&2
+    echo "\"${stage}\",\"${proj_id}\",\"${ns}\",\"${url}\",\"${http_code}\"" >> "${HTTP_LOG_DIR}/errors_${proj_id:-main}.csv"
+  fi
 
   cat "$tmpbody"
   rm -f "$tmpbody"
@@ -105,7 +114,7 @@ search_project() {
 }
 
 export -f search_project curl_with_code
-export BASE RESULTS_DIR HTTP_LOG_DIR
+export BASE RESULTS_DIR HTTP_LOG_DIR ERRORS_LOG
 
 echo "[*] Scanning trees (concurrency: $CONCURRENCY)..."
 
@@ -124,22 +133,33 @@ echo "[*] Merging results..."
 find "$RESULTS_DIR" -name "*.csv" -exec cat {} \; >> "$OUTPUT"
 
 echo "[*] Merging HTTP logs..."
-find "$HTTP_LOG_DIR" -name "*.csv" -exec cat {} \; >> "$HTTP_LOG"
+find "$HTTP_LOG_DIR" -name "*.csv" ! -name "errors_*.csv" -exec cat {} \; >> "$HTTP_LOG"
+
+echo "[*] Merging error logs..."
+find "$HTTP_LOG_DIR" -name "errors_*.csv" -exec cat {} \; >> "$ERRORS_LOG"
 
 # ── 4. Summary ───────────────────────────────────────────────────────────────
 found=$(( $(wc -l < "$OUTPUT") - 1 ))
 total_requests=$(( $(wc -l < "$HTTP_LOG") - 1 ))
+total_errors=$(( $(wc -l < "$ERRORS_LOG") - 1 ))
 
-# Count by HTTP code from the log
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo " Done. Found $found *sqe.fw file(s)"
-echo " Output:   $OUTPUT"
-echo " HTTP log: $HTTP_LOG ($total_requests requests)"
+echo " Output:     $OUTPUT"
+echo " HTTP log:   $HTTP_LOG ($total_requests requests)"
+echo " Errors log: $ERRORS_LOG ($total_errors non-200 responses)"
 echo ""
 echo " HTTP response code breakdown:"
 tail -n +2 "$HTTP_LOG" | cut -d',' -f5 | tr -d '"' | sort | uniq -c | sort -rn | \
   while read -r cnt code; do
     echo "   HTTP $code : $cnt requests"
   done
+if [[ $total_errors -gt 0 ]]; then
+  echo ""
+  echo " Non-200 requests:"
+  tail -n +2 "$ERRORS_LOG" | while IFS=',' read -r stage proj ns url code; do
+    echo "   [HTTP $(echo $code | tr -d '\"')] $(echo $ns | tr -d '\"') — $(echo $url | tr -d '\"')"
+  done
+fi
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
