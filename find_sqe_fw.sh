@@ -5,25 +5,51 @@ BASE="https://dumps.tadiphone.dev/api/v4"
 GROUP="dumps"
 CONCURRENCY=10
 OUTPUT="sqe_fw_files.csv"
+HTTP_LOG="http_responses.csv"
 TMPDIR_ROOT=$(mktemp -d)
 trap 'rm -rf "$TMPDIR_ROOT"' EXIT
 
 echo "repo,file_path,url" > "$OUTPUT"
+echo "stage,project_id,namespace,url,http_code" > "$HTTP_LOG"
+
+HTTP_LOG_DIR="$TMPDIR_ROOT/http_logs"
+mkdir -p "$HTTP_LOG_DIR"
+
+# ── Helper: curl with response code capture ──────────────────────────────────
+# Usage: curl_with_code <log_file> <stage> <proj_id> <ns> <url>
+# Prints response body to stdout; appends HTTP code to log_file
+curl_with_code() {
+  local log_file="$1"
+  local stage="$2"
+  local proj_id="$3"
+  local ns="$4"
+  local url="$5"
+
+  local tmpbody
+  tmpbody=$(mktemp)
+
+  local http_code
+  http_code=$(curl -s -o "$tmpbody" -w "%{http_code}" "$url" || echo "000")
+
+  echo "\"${stage}\",\"${proj_id}\",\"${ns}\",\"${url}\",\"${http_code}\"" >> "$log_file"
+
+  cat "$tmpbody"
+  rm -f "$tmpbody"
+}
 
 # ── 1. Fetch all projects ────────────────────────────────────────────────────
 echo "[*] Fetching project list..."
-PROJECT_FILE="$TMPDIR_ROOT/projects.txt"   # id|path_with_namespace|web_url|default_branch
+PROJECT_FILE="$TMPDIR_ROOT/projects.txt"
+MAIN_HTTP_LOG="$HTTP_LOG_DIR/main.csv"
 
 page=1
 total=0
 while true; do
-  response=$(curl -sf \
-    "${BASE}/groups/${GROUP}/projects?per_page=100&page=${page}&include_subgroups=true&simple=true" \
-    || true)
+  url="${BASE}/groups/${GROUP}/projects?per_page=100&page=${page}&include_subgroups=true&simple=true"
+  response=$(curl_with_code "$MAIN_HTTP_LOG" "project_list" "" "${GROUP}" "$url" || true)
 
   [[ -z "$response" || "$response" == "[]" ]] && break
 
-  # parse with jq: emit one line per project
   echo "$response" | jq -r '.[] | [.id, .path_with_namespace, .web_url, (.default_branch // "main")] | @tsv' \
     >> "$PROJECT_FILE"
 
@@ -48,17 +74,16 @@ search_project() {
   local web_url="$3"
   local ref="$4"
   local out="$RESULTS_DIR/${id}.csv"
+  local http_log="$HTTP_LOG_DIR/${id}.csv"
 
   local page=1
   while true; do
+    local url="${BASE}/projects/${id}/repository/tree?recursive=true&per_page=100&page=${page}&ref=${ref}"
     local resp
-    resp=$(curl -sf \
-      "${BASE}/projects/${id}/repository/tree?recursive=true&per_page=100&page=${page}&ref=${ref}" \
-      2>/dev/null || true)
+    resp=$(curl_with_code "$http_log" "tree" "$id" "$ns" "$url" 2>/dev/null || true)
 
     [[ -z "$resp" || "$resp" == "[]" || "$resp" == "null" ]] && break
 
-    # filter blobs ending in sqe.fw
     local matches
     matches=$(echo "$resp" | jq -r \
       '.[] | select(.type == "blob" and (.path | endswith("sqe.fw"))) | .path' \
@@ -79,20 +104,16 @@ search_project() {
   done
 }
 
-export -f search_project
-export BASE RESULTS_DIR
+export -f search_project curl_with_code
+export BASE RESULTS_DIR HTTP_LOG_DIR
 
 echo "[*] Scanning trees (concurrency: $CONCURRENCY)..."
-scanned=0
-total_lines=$(wc -l < "$PROJECT_FILE")
 
-# Use GNU parallel if available, otherwise xargs
 if command -v parallel &>/dev/null; then
-  parallel -j "$CONCURRENCY" --colsep '\t' \
+  parallel -j "$CONCURRENCY" --line-buffer --colsep '\t' \
     'search_project {1} {2} {3} {4}' \
     :::: "$PROJECT_FILE"
 else
-  # xargs fallback: wrap in a subshell so export -f works
   xargs -P "$CONCURRENCY" -I{} bash -c \
     'IFS=$'"'"'\t'"'"' read -r id ns url ref <<< "{}"; search_project "$id" "$ns" "$url" "$ref"' \
     < "$PROJECT_FILE"
@@ -102,9 +123,23 @@ fi
 echo "[*] Merging results..."
 find "$RESULTS_DIR" -name "*.csv" -exec cat {} \; >> "$OUTPUT"
 
+echo "[*] Merging HTTP logs..."
+find "$HTTP_LOG_DIR" -name "*.csv" -exec cat {} \; >> "$HTTP_LOG"
+
+# ── 4. Summary ───────────────────────────────────────────────────────────────
 found=$(( $(wc -l < "$OUTPUT") - 1 ))
+total_requests=$(( $(wc -l < "$HTTP_LOG") - 1 ))
+
+# Count by HTTP code from the log
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo " Done. Found $found *sqe.fw file(s)"
-echo " Output: $OUTPUT"
+echo " Output:   $OUTPUT"
+echo " HTTP log: $HTTP_LOG ($total_requests requests)"
+echo ""
+echo " HTTP response code breakdown:"
+tail -n +2 "$HTTP_LOG" | cut -d',' -f5 | tr -d '"' | sort | uniq -c | sort -rn | \
+  while read -r cnt code; do
+    echo "   HTTP $code : $cnt requests"
+  done
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
