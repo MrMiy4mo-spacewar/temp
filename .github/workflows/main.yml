@@ -6,7 +6,7 @@ on:
 jobs:
   find-sqe-fw:
     runs-on: ubuntu-latest
-    timeout-minutes: 120    # large group — give it time
+    timeout-minutes: 360    # large group — give it time
 
     steps:
       - name: Checkout
